@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
 const glob = require('glob');
 const path = require('path');
 const md5 = require('md5');
@@ -17,17 +19,54 @@ function getPseudoFileName(importee) {
 module.exports = ({ include, exclude } = {}) => {
 
 	const filter = createFilter(include, exclude);
-	const generatedCodes = new Map();
 
     return {
         'name': 'rollup-bulk-import',
         'load': function(id) {
-			if (!generatedCodes.has(id)) {
-			    return;
-		    }
-            const code = generatedCodes.get(id);
-            generatedCodes.delete(id);
+
+            const srcFile = path.join(os.tmpdir(), id);
+
+            let options;
+            try {
+                options = JSON.parse(fs.readFileSync(srcFile));
+            } catch(err) {
+                return;
+            }
+
+            const { importee, importer } = options;
+
+			const importeeIsAbsolute = path.isAbsolute(importee);
+            const cwd = path.dirname(importer);
+            const globPattern = importee;
+
+            const files = glob.sync(globPattern, {
+                'cwd': cwd
+            });
+
+            let code = [`const res = [];`];
+            let importArray = [];
+
+            files.forEach((file, i) => {
+                let from;
+                if (importeeIsAbsolute) {
+                    from = toURLString(file);
+                } else {
+                    from = toURLString(path.resolve(cwd, file));
+                }
+                code.push(`import f${i} from '${from}';`);
+                code.push(`res.push({
+                    'path': '${from}',
+                    'value': f${i}
+                })`);
+                importArray.push(from);
+            });
+
+            code.push(`export default res;`);
+
+            code = code.join('\n');
+
             return code;
+
         },
         'resolveId': function(importee, importer) {
 
@@ -37,39 +76,12 @@ module.exports = ({ include, exclude } = {}) => {
 
             const hash = md5(importee + importer);
 
-			const importeeIsAbsolute = path.isAbsolute(importee);
+            fs.writeFileSync(path.join(os.tmpdir(), hash), JSON.stringify({
+                'importee': importee,
+                'importer': importer
+            }));
 
-            const cwd = path.dirname(importer);
-            const globPattern = importee;
-
-            const files = glob.sync(globPattern, {
-                'cwd': cwd
-            });
-
-            let code = [`const res = [];`];
-
-            files.forEach((file, i) => {
-                let from;
-                if (importeeIsAbsolute) {
-                    from = toURLString(file);
-                    code.push(`import f${i} from '${from}';`);
-                } else {
-                    from = toURLString(path.resolve(cwd, file));
-                    code.push(`import f${i} from '${from}';`);
-                }
-                code.push(`res.push({
-                    'path': '${from}',
-                    'value': f${i}
-                })`);
-            });
-
-            code.push(`export default res;`);
-
-            code = code.join('\n');
-
-			const pseudoPath = path.join(cwd, getPseudoFileName(importee));
-			generatedCodes.set(pseudoPath, code);
-			return pseudoPath;
+            return hash;
 
         }
     };
